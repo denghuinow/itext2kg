@@ -77,7 +77,17 @@ class LangchainOutputParser(LLMOutputParserInterface):
     rate limiting and batch processing constraints.
     """
     
-    def __init__(self, llm_model, embeddings_model, sleep_time: int = 5, provider_type: Optional[ProviderType] = None) -> None:
+    def __init__(
+        self,
+        llm_model,
+        embeddings_model,
+        sleep_time: int = 5,
+        provider_type: Optional[ProviderType] = None,
+        sleep_between_batches: Optional[float] = None,
+        max_concurrency: Optional[int] = None,
+        max_elements_per_batch: Optional[int] = None,
+        max_tokens_per_batch: Optional[int] = None,
+    ) -> None:
         """
         Initialize the LangchainOutputParser with specified models and operational parameters.
         
@@ -86,18 +96,42 @@ class LangchainOutputParser(LLMOutputParserInterface):
             embeddings_model: The embeddings model to use  
             sleep_time: Sleep time between retries (default: 5 seconds)
             provider_type: Explicitly specify provider type (auto-detected if None)
+            sleep_between_batches: Override provider default delay between batches (seconds)
+            max_concurrency: Override max concurrency for LangChain runnable batch execution
+            max_elements_per_batch: Override provider default requests per batch
+            max_tokens_per_batch: Override provider default tokens per batch
         """
         self.model = llm_model
         self.embeddings_model = embeddings_model
         self.sleep_time = sleep_time
+        self.max_concurrency = max_concurrency
         
         # Auto-detect provider or use explicitly provided type
         self.provider_type = provider_type if provider_type else self._detect_provider()
-        self.config = PROVIDER_CONFIGS[self.provider_type]
+        base_config = PROVIDER_CONFIGS[self.provider_type]
+        self.config = ProviderConfig(
+            name=base_config.name,
+            max_elements_per_batch=(
+                int(max_elements_per_batch) if max_elements_per_batch is not None else base_config.max_elements_per_batch
+            ),
+            max_tokens_per_batch=(
+                int(max_tokens_per_batch) if max_tokens_per_batch is not None else base_config.max_tokens_per_batch
+            ),
+            max_context_window=base_config.max_context_window,
+            max_pending_requests=base_config.max_pending_requests,
+            warning_threshold_ratio=base_config.warning_threshold_ratio,
+            sleep_between_batches=(
+                float(sleep_between_batches) if sleep_between_batches is not None else base_config.sleep_between_batches
+            ),
+        )
         
         logger.info(f"🔍 Detected LLM Provider: {self.config.name}")
         logger.info(f"📊 Rate Limiting Config: {self.config.max_elements_per_batch} requests/batch, "
               f"{self.config.max_tokens_per_batch} tokens/batch")
+        if self.max_concurrency is not None:
+            logger.info(f"🧵 LangChain Concurrency: max_concurrency={self.max_concurrency}")
+        if sleep_between_batches is not None:
+            logger.info(f"😴 Batch Delay Override: sleep_between_batches={self.config.sleep_between_batches}s")
         
         # Add specific info for Mistral
         if self.provider_type == ProviderType.MISTRAL:
@@ -293,7 +327,8 @@ class LangchainOutputParser(LLMOutputParserInterface):
             
             for attempt in range(max_retries + 1):
                 try:
-                    batch_outputs = await structured_llm.abatch(batch)
+                    runnable_config = {"max_concurrency": self.max_concurrency} if self.max_concurrency else None
+                    batch_outputs = await structured_llm.abatch(batch, config=runnable_config)
                     outputs.extend(batch_outputs)
                     break  # Success, exit retry loop
                     

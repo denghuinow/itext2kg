@@ -12,7 +12,10 @@ class BaseModelWithConfig(BaseModel):
         extra="ignore"
     )
 
-LABEL_PATTERN = re.compile(r'[^a-zA-Z0-9]+')  # For cleaning labels
+# For cleaning labels/relationship names:
+# - Use Unicode "word" characters (letters/digits/underscore) so Chinese won't be wiped out.
+# - Replace other chars (spaces/punctuations) with underscores for stability.
+LABEL_PATTERN = re.compile(r"[^\w]+", flags=re.UNICODE)
 
 class RelationshipProperties(BaseModelWithConfig):
     embeddings:   Optional[np.ndarray]  = None
@@ -32,7 +35,9 @@ class Relationship(BaseModelWithConfig):
     properties:  RelationshipProperties = Field(default_factory=RelationshipProperties)
 
     def process(self) -> "Relationship":
-        self.name = LABEL_PATTERN.sub("_", self.name).replace("&", "and").lower()
+        cleaned = LABEL_PATTERN.sub("_", self.name).replace("&", "and")
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+        self.name = cleaned.lower()
         return self
     
     def combine_timestamps(

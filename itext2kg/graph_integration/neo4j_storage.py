@@ -1,11 +1,15 @@
 from neo4j import GraphDatabase
 import numpy as np
+import logging
 from typing import List, Optional
 from itext2kg.atom.models import KnowledgeGraph
 from itext2kg.graph_integration.storage_interface import GraphStorageInterface
 from itext2kg.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# 禁用 Neo4j 驱动的日志输出，避免打印包含向量的查询
+logging.getLogger("neo4j").setLevel(logging.WARNING)
 
 class Neo4jStorage(GraphStorageInterface):
     """

@@ -41,9 +41,87 @@ class Prompt(Enum):
     # "next month" = first day of September 2024
     
     """
+
+    EXAMPLES_ZH = """
+    FEW SHOT EXAMPLES（中文翻译版）\n
+
+    * 米歇尔（Michel）在 2019 年到 2021 年间担任 Acme Corp 的首席财务官（CFO）。他在 2021 年被 Beta Inc 雇用，但在 2023 年离开了该职位。
+    -> (Michel, 担任_CFO_于, Acme Corp, ["01-01-2019"], ["01-01-2021"]), (Michel, 就职于, Beta Inc, ["01-01-2021"], ["01-01-2023"])
+
+    * 后续实验确认了 microRNAs 在调节细胞生长中的作用。
+    -> (实验, 确认_作用_于, microRNAs, [], []), (microRNAs, 调节, 细胞生长, [], [])
+
+    * 研究人员在一项关于神经可塑性的研究中使用了高分辨率成像。
+    -> (研究人员, 使用, 高分辨率成像, [], []), (高分辨率成像, 被用于, 神经可塑性研究, [], [])
+
+    * 萨拉（Sarah）在 2019 年之前一直是 GreenFuture 的董事会成员。
+    -> (Sarah, 担任_董事会成员_于, GreenFuture, [], ["01-01-2019"])
+
+    * 李博士（Dr. Lee）在 2022 年之前一直是肿瘤科（Oncology Department）的负责人。
+    -> (Dr. Lee, 担任_负责人_于, 肿瘤科, [], ["01-01-2022"])
+
+    * 活动依赖的受体转运调节对于维持突触效能至关重要。
+    -> (活动依赖的调节, 涉及, 受体转运, [], []), (受体转运, 维持, 突触效能, [], [])
+
+    * （observation_date = 2024-06-15）John Doe 在几个月前就不再是 GreenIT 的 CEO 了。
+    -> (John Doe, 担任_CEO_于, GreenIT, [], ["2024-03-15"])
+    # “几个月前”≈3 个月 → 2024-06-15 往前推 3 个月 = 2024-03-15
+
+    * John Doe 的婚礼将在 26-02-2026 举行。
+    -> (John Doe, 具有状态, 已婚, ["2026-02-26"], [])
+
+    * （observation_date = 2024-03-20）AI Summit 会议昨天开始，明天结束。
+    -> (AI Summit, 具有状态, 已开始, ["2024-03-19"], ["2024-03-21"])
+
+    * 摩洛哥的独立日自 1956 年起每年 1 月 1 日庆祝。
+    -> (摩洛哥, 庆祝, 独立日, ["1956-01-01"], [])
+
+    * （observation_date = 2024-08-10）产品发布会计划在下个月举行。
+    -> (产品发布会, 具有状态, 已计划, ["2024-09-01"], [])
+    # “下个月”= 2024 年 9 月的第一天
+    """
     
     @staticmethod
-    def temporal_system_query(obs_timestamp: str) -> str:
+    def examples(output_language: str = "en") -> str:
+        return Prompt.EXAMPLES_ZH.value if output_language.lower().startswith("zh") else Prompt.EXAMPLES.value
+
+    @staticmethod
+    def temporal_system_query(
+        obs_timestamp: str,
+        output_language: str = "en",
+        entity_name_mode: str = "normalized",
+        relation_name_mode: str = "en_snake",
+    ) -> str:
+        if output_language.lower().startswith("zh"):
+            entity_rule = (
+                "实体名称（Entity.name）必须与原文一致：中文就保持中文，不要翻译成英文/拼音，不要改写或“标准化”为英文别名。"
+                if entity_name_mode == "source"
+                else "实体名称（Entity.name）允许做轻度规范化（如去除多余空格），但不要将中文翻译成英文或引入原文未出现的别名。"
+            )
+            relation_rule = (
+                "关系名称（Relationship.name）使用中文、简洁的动词/动宾短语，尽量直接来自原文表达；不要使用英文 snake_case（如 is_founder_of）。"
+                if relation_name_mode == "source"
+                else "关系名称（Relationship.name）使用英文、简洁的 snake_case（如 is_founder_of / works_at），保持现在时。"
+            )
+            return f"""
+        Observation Time : {obs_timestamp}
+
+        你是一个用于从文本中抽取结构化信息并构建知识图谱的算法。
+        请尽可能全面抽取信息，但不要牺牲准确性；禁止添加任何原文未明确提及的信息。
+
+        关键要求（必须遵守）：
+        - {entity_rule}（entity_name_mode={entity_name_mode}）
+        - 实体类别（Entity.label）可以使用通用英文类别（如 Person/Organization/Event/Field/Model 等），无需与原文一致。
+        - {relation_rule}（relation_name_mode={relation_name_mode}）
+        - 关系名保持“现在时含义”的规范表达，时间边界用 t_start/t_end 表达（若文本有明确时间信息）。
+        """
+
+        entity_extra = ""
+        relation_extra = ""
+        if entity_name_mode == "source":
+            entity_extra = "- Keep entity names (Entity.name) exactly as in the source text; do not translate or romanize.\n"
+        if relation_name_mode == "source":
+            relation_extra = "- Use Chinese relation names (Relationship.name) as concise verb phrases from the source text; avoid English snake_case.\n"
         return f""" 
         Observation Time : {obs_timestamp}
         
@@ -53,6 +131,7 @@ class Prompt(Enum):
         sacrificing accuracy. Do not add any information that is not explicitly mentioned in the text
         Remember, the knowledge graph should be coherent and easily understandable, 
         so maintaining consistency in entity references is crucial.
+        {entity_extra}{relation_extra}
         """
 
 '''

@@ -16,7 +16,9 @@ class GraphMatcherInterface(Protocol):
         relationships_1: List["Relationship"],
         relationships_2: List["Relationship"],
         rel_threshold: float = 0.8,
-        ent_threshold: float = 0.8
+        ent_threshold: float = 0.8,
+        require_same_entity_label: bool = False,
+        rename_relationship_by_embedding: bool = True,
     ) -> Tuple[List["Entity"], List["Relationship"]]:
         """
         Match and merge two sets of entities and relationships.
@@ -35,5 +37,4 @@ class GraphMatcherInterface(Protocol):
             - combined_relationships: Merged list of relationships with updated entity references
         """
         ...
-
 

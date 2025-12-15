@@ -16,6 +16,7 @@ class Atom:
     def __init__(self, 
                  llm_model,
                  embeddings_model,
+                 llm_output_parser: Optional[LangchainOutputParser] = None,
                  ) -> None:        
         """
         Initializes the ATOM with specified language model, embeddings model, and operational parameters.
@@ -25,19 +26,50 @@ class Atom:
         llm_output_parser: The language model instance to be used for extracting entities and relationships from text.
         """
         self.matcher = GraphMatcher()
-        self.llm_output_parser = LangchainOutputParser(llm_model=llm_model, embeddings_model=embeddings_model)
+        self.llm_output_parser = llm_output_parser or LangchainOutputParser(
+            llm_model=llm_model,
+            embeddings_model=embeddings_model,
+        )
     
     async def extract_quintuples(self, atomic_facts: List[str], observation_timestamp: str) -> List[RelationshipsExtractor]:
         """
         Extracts relationships from atomic facts using the language model.
         """
+        return await self.extract_quintuples_with_language(
+            atomic_facts=atomic_facts,
+            observation_timestamp=observation_timestamp,
+            output_language="en",
+        )
+
+    async def extract_quintuples_with_language(
+        self,
+        atomic_facts: List[str],
+        observation_timestamp: str,
+        output_language: str = "en",
+        entity_name_mode: str = "normalized",
+        relation_name_mode: str = "en_snake",
+    ) -> List[RelationshipsExtractor]:
         return await self.llm_output_parser.extract_information_as_json_for_context(
             output_data_structure=RelationshipsExtractor,
             contexts=atomic_facts,
-            system_query=Prompt.temporal_system_query(observation_timestamp) + Prompt.EXAMPLES.value
+            system_query=Prompt.temporal_system_query(
+                observation_timestamp,
+                output_language=output_language,
+                entity_name_mode=entity_name_mode,
+                relation_name_mode=relation_name_mode,
+            )
+            + Prompt.examples(output_language),
         )
 
-    def merge_two_kgs(self, kg1, kg2, rel_threshold:float=0.8, ent_threshold:float=0.8):
+    def merge_two_kgs(
+        self,
+        kg1,
+        kg2,
+        rel_threshold: float = 0.8,
+        ent_threshold: float = 0.8,
+        require_same_entity_label: bool = False,
+        rename_relationship_by_embedding: bool = True,
+    ):
         """
         Merges two KGs using the same logic as the sequential approach above.
         Returns a single KnowledgeGraph.
@@ -48,14 +80,31 @@ class Atom:
             entities_1=kg2.entities,
             relationships_1=kg2.relationships,
             rel_threshold=rel_threshold,
-            ent_threshold=ent_threshold
+            ent_threshold=ent_threshold,
+            require_same_entity_label=require_same_entity_label,
+            rename_relationship_by_embedding=rename_relationship_by_embedding,
         )
         return KnowledgeGraph(entities=updated_entities, relationships=updated_relationships)
 
-    def parallel_atomic_merge(self, kgs: List[KnowledgeGraph], existing_kg: Optional[KnowledgeGraph] = None, rel_threshold: float = 0.8, ent_threshold: float = 0.8, max_workers: int = 4) -> KnowledgeGraph:
+    def parallel_atomic_merge(
+        self,
+        kgs: List[KnowledgeGraph],
+        existing_kg: Optional[KnowledgeGraph] = None,
+        rel_threshold: float = 0.8,
+        ent_threshold: float = 0.8,
+        max_workers: int = 4,
+        require_same_entity_label: bool = False,
+        rename_relationship_by_embedding: bool = True,
+    ) -> KnowledgeGraph:
         """
         Merges a list of KnowledgeGraphs in parallel, reducing them pairwise.
         """
+        # Handle empty input list
+        if not kgs:
+            if existing_kg and not existing_kg.is_empty():
+                return existing_kg
+            return KnowledgeGraph()
+        
         # Keep merging until we have just one KG
         current = kgs
         while len(current) > 1:
@@ -70,7 +119,18 @@ class Atom:
             
             # Merge pairs in parallel
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(self.merge_two_kgs, p[0], p[1], rel_threshold, ent_threshold) for p in pairs]
+                futures = [
+                    executor.submit(
+                        self.merge_two_kgs,
+                        p[0],
+                        p[1],
+                        rel_threshold,
+                        ent_threshold,
+                        require_same_entity_label,
+                        rename_relationship_by_embedding,
+                    )
+                    for p in pairs
+                ]
                 for f in concurrent.futures.as_completed(futures):
                     merged_results.append(f.result())
             
@@ -79,8 +139,22 @@ class Atom:
                 merged_results.append(leftover)
             
             current = merged_results
+        
+        # Handle case where current becomes empty after merging
+        if not current:
+            if existing_kg and not existing_kg.is_empty():
+                return existing_kg
+            return KnowledgeGraph()
+        
         if existing_kg and not existing_kg.is_empty():
-            return self.merge_two_kgs(current[0], existing_kg, rel_threshold, ent_threshold)
+            return self.merge_two_kgs(
+                current[0],
+                existing_kg,
+                rel_threshold,
+                ent_threshold,
+                require_same_entity_label,
+                rename_relationship_by_embedding,
+            )
         return current[0]
 
     async def build_atomic_kg_from_quintuples(self, 
@@ -90,6 +164,8 @@ class Atom:
         rel_threshold:float=0.8,
         ent_threshold:float=0.8,
         max_workers:int=8,
+        require_same_entity_label: bool = False,
+        rename_relationship_by_embedding: bool = True,
         ):
         embedded_relationships = []
         temp_kg = KnowledgeGraph(entities=[Entity(**rel.startNode.model_dump()) for rel in relationships] + [Entity(**rel.endNode.model_dump()) for rel in relationships])
@@ -150,7 +226,10 @@ class Atom:
             kgs=atomic_kgs, 
             rel_threshold=rel_threshold, 
             ent_threshold=ent_threshold, 
-            max_workers=max_workers)
+            max_workers=max_workers,
+            require_same_entity_label=require_same_entity_label,
+            rename_relationship_by_embedding=rename_relationship_by_embedding,
+        )
 
     async def build_graph(self, 
                           atomic_facts:List[str],
@@ -161,9 +240,19 @@ class Atom:
                           entity_name_weight:float=0.8,
                           entity_label_weight:float=0.2,
                           max_workers:int=8,
+                          output_language: str = "en",
+                          entity_name_mode: str = "normalized",
+                          relation_name_mode: str = "en_snake",
+                          require_same_entity_label: bool = False,
+                          rename_relationship_by_embedding: bool = True,
                         ) -> KnowledgeGraph:
-        system_query = Prompt.temporal_system_query(obs_timestamp=obs_timestamp)
-        examples = Prompt.EXAMPLES.value
+        system_query = Prompt.temporal_system_query(
+            obs_timestamp=obs_timestamp,
+            output_language=output_language,
+            entity_name_mode=entity_name_mode,
+            relation_name_mode=relation_name_mode,
+        )
+        examples = Prompt.examples(output_language)
         logger.info("------- Extracting Quintuples---------")
         relationships = await self.llm_output_parser.extract_information_as_json_for_context(output_data_structure=RelationshipsExtractor, contexts=atomic_facts, system_query=system_query+examples)
         
@@ -176,7 +265,10 @@ class Atom:
             [entity_label_weight for _ in relationships],
             [rel_threshold for _ in relationships],
             [ent_threshold for _ in relationships],
-            [max_workers for _ in relationships])))
+            [max_workers for _ in relationships],
+            [require_same_entity_label for _ in relationships],
+            [rename_relationship_by_embedding for _ in relationships],
+        )))
 
         logger.info("------- Adding Atomic Facts to Atomic KGs---------")
         for atomic_kg, fact in zip(atomic_kgs, atomic_facts):
@@ -187,7 +279,9 @@ class Atom:
         merged_kg = self.parallel_atomic_merge(kgs=cleaned_atomic_kgs, 
         rel_threshold=rel_threshold, 
         ent_threshold=ent_threshold, 
-        max_workers=max_workers
+        max_workers=max_workers,
+        require_same_entity_label=require_same_entity_label,
+        rename_relationship_by_embedding=rename_relationship_by_embedding,
         )
 
         logger.info("------- Adding Observation Timestamp to Relationships---------")
@@ -200,6 +294,8 @@ class Atom:
                                                                  relationships_2=existing_knowledge_graph.relationships,
                                                                  ent_threshold=ent_threshold,
                                                                  rel_threshold=rel_threshold,
+                                                                 require_same_entity_label=require_same_entity_label,
+                                                                 rename_relationship_by_embedding=rename_relationship_by_embedding,
                                                                 #  entity_name_weight=entity_name_weight,
                                                                 #  entity_label_weight=entity_label_weight
                                                                  )    
@@ -216,11 +312,21 @@ class Atom:
                                                     entity_name_weight:float=0.8,
                                                     entity_label_weight:float=0.2,
                                                     max_workers:int=8,
+                                                    output_language: str = "en",
+                                                    entity_name_mode: str = "normalized",
+                                                    relation_name_mode: str = "en_snake",
+                                                    require_same_entity_label: bool = False,
+                                                    rename_relationship_by_embedding: bool = True,
                                                ):
         kgs = await asyncio.gather(*[
                         self.build_graph(
                             atomic_facts=atomic_facts_with_obs_timestamps[timestamp], 
                             obs_timestamp=timestamp,
+                            output_language=output_language,
+                            entity_name_mode=entity_name_mode,
+                            relation_name_mode=relation_name_mode,
+                            require_same_entity_label=require_same_entity_label,
+                            rename_relationship_by_embedding=rename_relationship_by_embedding,
                             ent_threshold=ent_threshold,
                             rel_threshold=rel_threshold,
                             entity_name_weight=entity_name_weight,
@@ -229,6 +335,20 @@ class Atom:
                         ) for timestamp in atomic_facts_with_obs_timestamps
                     ])
         if existing_knowledge_graph:
-            return self.parallel_atomic_merge(kgs=[existing_knowledge_graph] + kgs, rel_threshold=rel_threshold, ent_threshold=ent_threshold, max_workers=max_workers)
+            return self.parallel_atomic_merge(
+                kgs=[existing_knowledge_graph] + kgs,
+                rel_threshold=rel_threshold,
+                ent_threshold=ent_threshold,
+                max_workers=max_workers,
+                require_same_entity_label=require_same_entity_label,
+                rename_relationship_by_embedding=rename_relationship_by_embedding,
+            )
         
-        return self.parallel_atomic_merge(kgs=kgs, rel_threshold=rel_threshold, ent_threshold=ent_threshold, max_workers=max_workers)
+        return self.parallel_atomic_merge(
+            kgs=kgs,
+            rel_threshold=rel_threshold,
+            ent_threshold=ent_threshold,
+            max_workers=max_workers,
+            require_same_entity_label=require_same_entity_label,
+            rename_relationship_by_embedding=rename_relationship_by_embedding,
+        )

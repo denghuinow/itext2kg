@@ -20,7 +20,8 @@ class GraphMatcher(GraphMatcherInterface):
         self,
         entities1: List["Entity"],
         entities2: List["Entity"],
-        threshold: float = 0.8
+        threshold: float = 0.8,
+        require_same_label: bool = False,
     ) -> Tuple[List["Entity"], List["Entity"]]:
         """
         Batch-match entities1 against entities2, returning:
@@ -64,30 +65,55 @@ class GraphMatcher(GraphMatcherInterface):
 
         # 2) For those in 'to_match', do embedding-based matching
         if to_match and unmatched_entities2:
-            # Build embedding matrices
-            e1_embs = np.vstack([t[1].properties.embeddings for t in to_match])  # (N, d)
-            e2_embs = np.vstack([u.properties.embeddings for u in unmatched_entities2])  # (M, d)
-            sim_matrix = cosine_similarity(e1_embs, e2_embs)  # shape (N, M)
+            if require_same_label:
+                unmatched_by_label = {}
+                for e2 in unmatched_entities2:
+                    unmatched_by_label.setdefault(e2.label, []).append(e2)
 
-            # Pick for each e1 the best unmatched e2
-            best_cols = sim_matrix.argmax(axis=1)
-            best_scores = sim_matrix.max(axis=1)
+                for i_in_e1, e1_obj in to_match:
+                    candidates = unmatched_by_label.get(e1_obj.label, [])
+                    if not candidates:
+                        matched_entities1[i_in_e1] = e1_obj
+                        continue
+                    e1_emb = np.vstack([e1_obj.properties.embeddings])  # (1, d)
+                    e2_embs = np.vstack([u.properties.embeddings for u in candidates])  # (M, d)
+                    sim_row = cosine_similarity(e1_emb, e2_embs).reshape(-1)  # (M,)
+                    best_idx = int(sim_row.argmax())
+                    best_score = float(sim_row.max())
+                    if best_score >= threshold:
+                        best_match_e2 = candidates[best_idx]
+                        logger.info(
+                            f"Wohoo! Entity was matched --- [{e1_obj.name}:{e1_obj.label}] "
+                            f"--merged --> [{best_match_e2.name}:{best_match_e2.label}] (score={best_score:.2f})"
+                        )
+                        matched_entities1[i_in_e1] = best_match_e2
+                    else:
+                        matched_entities1[i_in_e1] = e1_obj
+            else:
+                # Build embedding matrices
+                e1_embs = np.vstack([t[1].properties.embeddings for t in to_match])  # (N, d)
+                e2_embs = np.vstack([u.properties.embeddings for u in unmatched_entities2])  # (M, d)
+                sim_matrix = cosine_similarity(e1_embs, e2_embs)  # shape (N, M)
 
-            for (row_idx, col_idx, score) in zip(range(len(to_match)), best_cols, best_scores):
-                i_in_e1 = to_match[row_idx][0]
-                e1_obj  = to_match[row_idx][1]
+                # Pick for each e1 the best unmatched e2
+                best_cols = sim_matrix.argmax(axis=1)
+                best_scores = sim_matrix.max(axis=1)
 
-                if score >= threshold:
-                    best_match_e2 = unmatched_entities2[col_idx]
-                    logger.info(f"Wohoo! Entity was matched --- [{e1_obj.name}:{e1_obj.label}] --merged --> [{best_match_e2.name}:{best_match_e2.label}] (score={score:.2f})")
-                    # Fill matched_entities1 at the same index as e1
-                    #
-                    # If you prefer to unify onto the object from entities2 (so references
-                    # all end up pointing to the same object), do:
-                    matched_entities1[i_in_e1] = best_match_e2
-                else:
-                    # No sufficiently close match => keep e1
-                    matched_entities1[i_in_e1] = e1_obj
+                for (row_idx, col_idx, score) in zip(range(len(to_match)), best_cols, best_scores):
+                    i_in_e1 = to_match[row_idx][0]
+                    e1_obj  = to_match[row_idx][1]
+
+                    if score >= threshold:
+                        best_match_e2 = unmatched_entities2[col_idx]
+                        logger.info(f"Wohoo! Entity was matched --- [{e1_obj.name}:{e1_obj.label}] --merged --> [{best_match_e2.name}:{best_match_e2.label}] (score={score:.2f})")
+                        # Fill matched_entities1 at the same index as e1
+                        #
+                        # If you prefer to unify onto the object from entities2 (so references
+                        # all end up pointing to the same object), do:
+                        matched_entities1[i_in_e1] = best_match_e2
+                    else:
+                        # No sufficiently close match => keep e1
+                        matched_entities1[i_in_e1] = e1_obj
         else:
             # No embedding matching needed, just fill them in as themselves
             for (i_in_e1, e1_obj) in to_match:
@@ -106,7 +132,8 @@ class GraphMatcher(GraphMatcherInterface):
         self,
         rels1: List["Relationship"],
         rels2: List["Relationship"],
-        threshold: float = 0.8
+        threshold: float = 0.8,
+        rename_by_embedding: bool = True,
     ) -> List["Relationship"]:
         """
         For each Relationship in `rels1`, find the most similar Relationship in `rels2`
@@ -125,16 +152,19 @@ class GraphMatcher(GraphMatcherInterface):
         if not rels2:
             return rels1, rels1
             
-        # Gather embeddings from both sets
-        r1_embs = np.vstack([r.properties.embeddings for r in rels1])
-        r2_embs = np.vstack([r.properties.embeddings for r in rels2])
+        best_cols = None
+        best_scores = None
+        if rename_by_embedding:
+            # Gather embeddings from both sets
+            r1_embs = np.vstack([r.properties.embeddings for r in rels1])
+            r2_embs = np.vstack([r.properties.embeddings for r in rels2])
 
-        # Compute matrix of cosine similarities: shape (len(rels1), len(rels2))
-        sim_matrix = cosine_similarity(r1_embs, r2_embs)
+            # Compute matrix of cosine similarities: shape (len(rels1), len(rels2))
+            sim_matrix = cosine_similarity(r1_embs, r2_embs)
 
-        # For each row i, find the best column j
-        best_cols = sim_matrix.argmax(axis=1)  # best match index in rels2
-        best_scores = sim_matrix.max(axis=1)   # best match score
+            # For each row i, find the best column j
+            best_cols = sim_matrix.argmax(axis=1)  # best match index in rels2
+            best_scores = sim_matrix.max(axis=1)   # best match score
 
         # Track relationships that should be removed (to avoid modifying list during iteration)
         full_relationships_match = []
@@ -142,7 +172,7 @@ class GraphMatcher(GraphMatcherInterface):
         # - Matching the names of relationships -------------------------------------
         # Rename relationships in rels1 if above threshold
         for i, rel1 in enumerate(rels1):
-            if best_scores[i] >= threshold:
+            if rename_by_embedding and best_scores is not None and best_cols is not None and best_scores[i] >= threshold:
                 j = best_cols[i]
                 if rels1[i].name == rels2[j].name:
                     logger.info(f"Wohoo! Relation --- [{rels1[i].name}] -- exists already in the global relationships")
@@ -172,6 +202,21 @@ class GraphMatcher(GraphMatcherInterface):
         kg = KnowledgeGraph(relationships=rels1+rels2)
         return rels1, kg.relationships
 
+    @staticmethod
+    def _dedupe_relationships(relationships: List["Relationship"]) -> List["Relationship"]:
+        merged = {}
+        for rel in relationships:
+            key = (rel.startEntity.__hash__(), rel.endEntity.__hash__(), rel.name)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = rel
+                continue
+            existing.combine_timestamps(timestamps=rel.properties.t_obs, temporal_aspect="t_obs")
+            existing.combine_timestamps(timestamps=rel.properties.t_start, temporal_aspect="t_start")
+            existing.combine_timestamps(timestamps=rel.properties.t_end, temporal_aspect="t_end")
+            existing.combine_atomic_facts(rel.properties.atomic_facts)
+        return list(merged.values())
+
 
     def match_entities_and_update_relationships(
         self,
@@ -180,7 +225,9 @@ class GraphMatcher(GraphMatcherInterface):
         relationships_1: List["Relationship"],
         relationships_2: List["Relationship"],
         rel_threshold: float = 0.8,
-        ent_threshold: float = 0.8
+        ent_threshold: float = 0.8,
+        require_same_entity_label: bool = False,
+        rename_relationship_by_embedding: bool = True,
     ) -> Tuple[List["Entity"], List["Relationship"]]:
         """
         1) Batch-match 'entities_1' to 'entities_2' using matrix-based similarity.
@@ -196,10 +243,20 @@ class GraphMatcher(GraphMatcherInterface):
         r2 = relationships_2.copy()
 
         # -- 1) Batch-match the entities --
-        matched_e1, global_entities = self._batch_match_entities(e1, e2, threshold=ent_threshold)
+        matched_e1, global_entities = self._batch_match_entities(
+            e1,
+            e2,
+            threshold=ent_threshold,
+            require_same_label=require_same_entity_label,
+        )
 
         # -- 2) Batch-match the relationships --
-        matched_r1, _ = self._batch_match_relationships(r1, r2, threshold=rel_threshold)
+        matched_r1, _ = self._batch_match_relationships(
+            r1,
+            r2,
+            threshold=rel_threshold,
+            rename_by_embedding=rename_relationship_by_embedding,
+        )
 
         # -- 3) Build a mapping from old Entity objects => matched Entity objects
         entity_name_mapping = {}
@@ -229,5 +286,6 @@ class GraphMatcher(GraphMatcherInterface):
         # Because 'matched_r1' references objects that might have been changed
         # We'll unify them with 'global_rels' => remove duplicates by name
         combined_relationships = r2 + updated_matched_r1
+        combined_relationships = self._dedupe_relationships(combined_relationships)
 
         return global_entities, combined_relationships
