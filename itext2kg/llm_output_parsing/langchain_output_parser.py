@@ -1,11 +1,13 @@
 import time
 import logging
-from typing import Union, List, Any, Optional
+from typing import Union, List, Any, Optional, Dict
 import numpy as np
 import tiktoken
 from .llm_output_parser_interface import LLMOutputParserInterface
 from dataclasses import dataclass
 from enum import Enum
+import requests
+from requests.exceptions import SSLError, RequestException
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -155,6 +157,16 @@ class LangchainOutputParser(LLMOutputParserInterface):
             rps = 1 / self.config.sleep_between_batches if self.config.sleep_between_batches > 0 else float('inf')
             logger.info(f"🎯 Claude Optimization: Sequential processing at {rps:.1f} RPS (limit: 50 RPM)")
             logger.info("⏱️  Token limits: 30K input/minute, 8K output/minute, 200K context window")
+        
+        # Cache for tiktoken encodings to avoid repeated network downloads
+        self._encoding_cache: Dict[str, Any] = {}
+        # Preload default encoding with retry mechanism
+        try:
+            self._get_encoding_with_retry("cl100k_base")
+            logger.info("✅ Successfully loaded tiktoken encoding: cl100k_base")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to preload tiktoken encoding: {e}")
+            logger.warning("   Will retry on first use")
 
     def _detect_provider(self) -> ProviderType:
         """
@@ -199,6 +211,51 @@ class LangchainOutputParser(LLMOutputParserInterface):
         logger.warning("   Using conservative defaults for unknown provider")
         return ProviderType.UNKNOWN
 
+    def _get_encoding_with_retry(self, encoding_name: str, max_retries: int = 3) -> Any:
+        """
+        Get tiktoken encoding with retry mechanism to handle network/SSL errors.
+        
+        Args:
+            encoding_name: Name of the encoding to load
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            The tiktoken encoding object
+            
+        Raises:
+            Exception: If all retry attempts fail
+        """
+        # Check cache first
+        if encoding_name in self._encoding_cache:
+            return self._encoding_cache[encoding_name]
+        
+        # Try to get encoding with retry
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                encoding = tiktoken.get_encoding(encoding_name)
+                # Cache the encoding for future use
+                self._encoding_cache[encoding_name] = encoding
+                return encoding
+            except (SSLError, RequestException, Exception) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                    logger.warning(
+                        f"⚠️  Failed to load tiktoken encoding '{encoding_name}' "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    logger.warning(f"   Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"💥 Failed to load tiktoken encoding '{encoding_name}' "
+                        f"after {max_retries} attempts: {e}"
+                    )
+        
+        # If all retries failed, raise the last error
+        raise last_error or Exception(f"Failed to load encoding: {encoding_name}")
+
     def count_tokens(self, text: str, encoding_name: str = "cl100k_base") -> int:
         """
         Count the number of tokens in a given text using tiktoken.
@@ -206,7 +263,7 @@ class LangchainOutputParser(LLMOutputParserInterface):
         Note: Using cl100k_base encoding as approximation for most models.
         For more accuracy, consider using provider-specific tokenizers when available.
         """
-        encoding = tiktoken.get_encoding(encoding_name)
+        encoding = self._get_encoding_with_retry(encoding_name)
         tokens = encoding.encode(text)
         return len(tokens)
 

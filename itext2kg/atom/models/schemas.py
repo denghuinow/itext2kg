@@ -110,8 +110,8 @@ class Entity(BaseModel):
     label: str = Field(
         description=(
             "实体的粗粒度类别（coarse-grained category）。"
-            "请使用通用英文类别（例如：Person / Organization / Event / Field / Model / Location / Method / Concept 等），"
-            "优先使用稳定、一致、单词级的类别（例如 'Person' 而不是 'Person_Entity'）。"
+            "请使用中文、通用的粗粒度类别（例如：人物 / 组织 / 公司 / 团队 / 事件 / 概念 / 领域 / 模型 / 方法 / 地点 / 设备 等），"
+            "优先使用稳定、一致、短词级的类别（例如 '人物' 而不是 '人物实体'）。"
             "不要把领域名/术语本身当作 label（例如把 '人工智能' 作为 label），术语应放在 Entity.name。"
             "如果无法判断类别，请使用 'unknown'。"
             "不要抽取 Date 作为实体（时间应放在关系的 t_start/t_end 中）。"

@@ -115,7 +115,7 @@ class Prompt(Enum):
 
         关键要求（必须遵守）：
         - {entity_rule}（entity_name_mode={entity_name_mode}）
-        - 实体类别（Entity.label）必须使用通用英文粗粒度类别（如 Person/Organization/Event/Field/Model 等），不要使用中文类别或领域术语当作 label；不确定时用 unknown。
+        - 实体类别（Entity.label）必须使用中文、通用的粗粒度类别（如 人物/组织/公司/团队/事件/概念/领域/模型/方法/设备 等），尽量简短明确；不确定时用 unknown。
         {("- Entity.label 只能取以下枚举之一：" + allowlist_hint) if allowlist_hint else ""}
         - {relation_rule}（relation_name_mode={relation_name_mode}）
         - 关系名保持“现在时含义”的规范表达，时间边界用 t_start/t_end 表达（若文本有明确时间信息）。
