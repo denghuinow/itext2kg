@@ -1,5 +1,4 @@
 import time
-import openai
 import logging
 from typing import Union, List, Any, Optional
 import numpy as np
@@ -10,6 +9,18 @@ from enum import Enum
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+
+try:
+    import openai  # type: ignore
+except Exception:  # pragma: no cover
+    class _OpenAIShim:
+        class RateLimitError(Exception):
+            pass
+
+        class BadRequestError(Exception):
+            pass
+
+    openai = _OpenAIShim()  # type: ignore
 
 class ProviderType(Enum):
     """Supported LLM providers"""

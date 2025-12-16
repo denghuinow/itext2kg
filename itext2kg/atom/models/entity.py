@@ -13,7 +13,7 @@ class BaseModelWithConfig(BaseModel):
         extra="ignore"
     )
 
-LABEL_PATTERN = re.compile(r'[^a-zA-Z0-9]+')  # For cleaning labels
+LABEL_PATTERN = re.compile(r"[^\w]+", flags=re.UNICODE)  # Keep Unicode word chars (incl. Chinese)
 NAME_PATTERN  = re.compile(r'[_"\-]+')       # For cleaning name underscores, quotes, dashes
 
 class EntityProperties(BaseModelWithConfig):
@@ -31,7 +31,9 @@ class Entity(BaseModelWithConfig):
         """
         Normalize `label` and `name` in-place and return self.
         """
-        self.label = LABEL_PATTERN.sub("_", self.label).replace("&", "and").lower()
+        cleaned_label = LABEL_PATTERN.sub("_", self.label).replace("&", "and")
+        cleaned_label = re.sub(r"_+", "_", cleaned_label).strip("_")
+        self.label = cleaned_label.lower()
         n = self.name.lower()
         n = NAME_PATTERN.sub(" ", n)
         self.name = n.strip()

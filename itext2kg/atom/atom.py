@@ -4,11 +4,13 @@ from itext2kg.llm_output_parsing import LangchainOutputParser
 from itext2kg.atom.models.schemas import Relationship as RelationshipSchema
 from itext2kg.atom.models.schemas import RelationshipsExtractor
 import concurrent.futures
-from typing import List, Optional
+from typing import Dict, List, Optional
 from itext2kg.atom.models.prompts import Prompt
 from dateutil import parser
 import asyncio
 from itext2kg.logging_config import get_logger
+import re
+from collections import Counter
 
 logger = get_logger(__name__)
 
@@ -48,6 +50,7 @@ class Atom:
         output_language: str = "en",
         entity_name_mode: str = "normalized",
         relation_name_mode: str = "en_snake",
+        entity_label_allowlist: Optional[List[str]] = None,
     ) -> List[RelationshipsExtractor]:
         return await self.llm_output_parser.extract_information_as_json_for_context(
             output_data_structure=RelationshipsExtractor,
@@ -57,9 +60,80 @@ class Atom:
                 output_language=output_language,
                 entity_name_mode=entity_name_mode,
                 relation_name_mode=relation_name_mode,
+                entity_label_allowlist=entity_label_allowlist,
             )
             + Prompt.examples(output_language),
         )
+
+    @staticmethod
+    def _normalize_entity_label(
+        label: str,
+        *,
+        allowlist: Optional[List[str]] = None,
+        aliases: Optional[Dict[str, str]] = None,
+        unknown_label: str = "unknown",
+    ) -> str:
+        raw = str(label or "").strip()
+        if not raw:
+            return unknown_label
+
+        aliases_map: Dict[str, str] = {}
+        if aliases:
+            aliases_map = {str(k).strip().casefold(): str(v).strip() for k, v in aliases.items() if str(k).strip() != ""}
+
+        mapped = aliases_map.get(raw.casefold(), raw)
+        mapped = str(mapped).strip()
+        if not mapped:
+            return unknown_label
+
+        canonical = mapped.lower()
+        if allowlist:
+            allow = {str(x).strip().lower() for x in allowlist if str(x).strip() != ""}
+            if canonical not in allow:
+                return unknown_label
+        return canonical
+
+    @classmethod
+    def _normalize_relationship_schemas(
+        cls,
+        relationships: List[RelationshipSchema],
+        *,
+        entity_label_allowlist: Optional[List[str]] = None,
+        entity_label_aliases: Optional[Dict[str, str]] = None,
+        unknown_entity_label: str = "unknown",
+        drop_unknown_entity_label: bool = False,
+        relation_fallback_name: str = "related_to",
+    ) -> List[RelationshipSchema]:
+        cleaned: List[RelationshipSchema] = []
+        for rel in relationships:
+            rel_name = str(getattr(rel, "name", "") or "").strip()
+            rel.name = rel_name if rel_name else str(relation_fallback_name or "related_to")
+
+            s_name = str(getattr(rel.startNode, "name", "") or "").strip()
+            o_name = str(getattr(rel.endNode, "name", "") or "").strip()
+            if not s_name or not o_name:
+                continue
+            rel.startNode.name = s_name
+            rel.endNode.name = o_name
+
+            s_label = cls._normalize_entity_label(
+                getattr(rel.startNode, "label", ""),
+                allowlist=entity_label_allowlist,
+                aliases=entity_label_aliases,
+                unknown_label=unknown_entity_label,
+            )
+            o_label = cls._normalize_entity_label(
+                getattr(rel.endNode, "label", ""),
+                allowlist=entity_label_allowlist,
+                aliases=entity_label_aliases,
+                unknown_label=unknown_entity_label,
+            )
+            if drop_unknown_entity_label and (s_label == unknown_entity_label or o_label == unknown_entity_label):
+                continue
+            rel.startNode.label = s_label
+            rel.endNode.label = o_label
+            cleaned.append(rel)
+        return cleaned
 
     def merge_two_kgs(
         self,
@@ -166,8 +240,23 @@ class Atom:
         max_workers:int=8,
         require_same_entity_label: bool = False,
         rename_relationship_by_embedding: bool = True,
+        entity_label_allowlist: Optional[List[str]] = None,
+        entity_label_aliases: Optional[Dict[str, str]] = None,
+        unknown_entity_label: str = "unknown",
+        drop_unknown_entity_label: bool = False,
+        relation_fallback_name: str = "related_to",
         ):
         embedded_relationships = []
+        relationships = self._normalize_relationship_schemas(
+            relationships,
+            entity_label_allowlist=entity_label_allowlist,
+            entity_label_aliases=entity_label_aliases,
+            unknown_entity_label=unknown_entity_label,
+            drop_unknown_entity_label=drop_unknown_entity_label,
+            relation_fallback_name=relation_fallback_name,
+        )
+        if not relationships:
+            return KnowledgeGraph()
         temp_kg = KnowledgeGraph(entities=[Entity(**rel.startNode.model_dump()) for rel in relationships] + [Entity(**rel.endNode.model_dump()) for rel in relationships])
         await temp_kg.embed_entities(embeddings_function=self.llm_output_parser.calculate_embeddings, entity_name_weight=entity_name_weight, entity_label_weight=entity_label_weight)
 
@@ -245,16 +334,92 @@ class Atom:
                           relation_name_mode: str = "en_snake",
                           require_same_entity_label: bool = False,
                           rename_relationship_by_embedding: bool = True,
+                          entity_label_allowlist: Optional[List[str]] = None,
+                          entity_label_aliases: Optional[Dict[str, str]] = None,
+                          unknown_entity_label: str = "unknown",
+                          drop_unknown_entity_label: bool = False,
+                          debug_log_empty_relation_name: bool = False,
+                          debug_relation_name_sample_size: int = 5,
+                          relation_fallback_name: str = "related_to",
                         ) -> KnowledgeGraph:
         system_query = Prompt.temporal_system_query(
             obs_timestamp=obs_timestamp,
             output_language=output_language,
             entity_name_mode=entity_name_mode,
             relation_name_mode=relation_name_mode,
+            entity_label_allowlist=entity_label_allowlist,
         )
         examples = Prompt.examples(output_language)
         logger.info("------- Extracting Quintuples---------")
         relationships = await self.llm_output_parser.extract_information_as_json_for_context(output_data_structure=RelationshipsExtractor, contexts=atomic_facts, system_query=system_query+examples)
+
+        if debug_log_empty_relation_name:
+            def _clean_relation_name(name: str) -> str:
+                # Mirror Relationship.process() cleaning logic without importing to avoid cycles.
+                label_pattern = re.compile(r"[^\w]+", flags=re.UNICODE)
+                cleaned = label_pattern.sub("_", str(name or "")).replace("&", "and")
+                cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+                return cleaned.lower()
+
+            total = 0
+            empty_raw = 0
+            empty_after_clean = 0
+            related_to_like_raw = 0
+            related_to_like_clean = 0
+            raw_counter: Counter[str] = Counter()
+            clean_counter: Counter[str] = Counter()
+            samples: List[str] = []
+
+            for fact, rel_block in zip(atomic_facts, relationships):
+                rels = list(getattr(rel_block, "relationships", []) or [])
+                for r in rels:
+                    total += 1
+                    raw_name = str(getattr(r, "name", "") or "")
+                    raw_stripped = raw_name.strip()
+                    cleaned = _clean_relation_name(raw_name)
+                    raw_counter.update([raw_stripped])
+                    clean_counter.update([cleaned])
+
+                    if raw_stripped.lower() in {"related_to", "related to", "related"}:
+                        related_to_like_raw += 1
+                    if cleaned in {"related_to", "related"}:
+                        related_to_like_clean += 1
+
+                    if raw_stripped == "":
+                        empty_raw += 1
+                        if len(samples) < int(debug_relation_name_sample_size):
+                            samples.append(
+                                f"EMPTY_RAW name={raw_name!r} s=({r.startNode.label},{r.startNode.name}) "
+                                f"o=({r.endNode.label},{r.endNode.name}) fact={str(fact)[:80]!r}"
+                            )
+                    elif cleaned == "":
+                        empty_after_clean += 1
+                        if len(samples) < int(debug_relation_name_sample_size):
+                            samples.append(
+                                f"EMPTY_AFTER_CLEAN name={raw_name!r} s=({r.startNode.label},{r.startNode.name}) "
+                                f"o=({r.endNode.label},{r.endNode.name}) fact={str(fact)[:80]!r}"
+                            )
+                    elif cleaned in {"related_to", "related"}:
+                        if len(samples) < int(debug_relation_name_sample_size):
+                            samples.append(
+                                f"GENERIC_REL name={raw_name!r} cleaned={cleaned!r} s=({r.startNode.label},{r.startNode.name}) "
+                                f"o=({r.endNode.label},{r.endNode.name}) fact={str(fact)[:80]!r}"
+                            )
+
+            logger.info(
+                "关系名诊断：total=%d empty_raw=%d empty_after_clean=%d generic_raw=%d generic_clean=%d fallback=%r",
+                total,
+                empty_raw,
+                empty_after_clean,
+                related_to_like_raw,
+                related_to_like_clean,
+                relation_fallback_name,
+            )
+            if total > 0:
+                logger.info("关系名TOP(清洗后)：%s", clean_counter.most_common(10))
+                logger.info("关系名TOP(原始)：%s", raw_counter.most_common(10))
+            for line in samples:
+                logger.info("关系名样例：%s", line)
         
         logger.info("------- Building Atomic KGs---------")
         
@@ -268,6 +433,11 @@ class Atom:
             [max_workers for _ in relationships],
             [require_same_entity_label for _ in relationships],
             [rename_relationship_by_embedding for _ in relationships],
+            [entity_label_allowlist for _ in relationships],
+            [entity_label_aliases for _ in relationships],
+            [unknown_entity_label for _ in relationships],
+            [drop_unknown_entity_label for _ in relationships],
+            [relation_fallback_name for _ in relationships],
         )))
 
         logger.info("------- Adding Atomic Facts to Atomic KGs---------")

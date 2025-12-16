@@ -91,7 +91,11 @@ class Prompt(Enum):
         output_language: str = "en",
         entity_name_mode: str = "normalized",
         relation_name_mode: str = "en_snake",
+        entity_label_allowlist: list[str] | None = None,
     ) -> str:
+        allowlist_hint = ""
+        if entity_label_allowlist:
+            allowlist_hint = " / ".join([str(x) for x in entity_label_allowlist if str(x).strip() != ""])
         if output_language.lower().startswith("zh"):
             entity_rule = (
                 "实体名称（Entity.name）必须与原文一致：中文就保持中文，不要翻译成英文/拼音，不要改写或“标准化”为英文别名。"
@@ -111,7 +115,8 @@ class Prompt(Enum):
 
         关键要求（必须遵守）：
         - {entity_rule}（entity_name_mode={entity_name_mode}）
-        - 实体类别（Entity.label）可以使用通用英文类别（如 Person/Organization/Event/Field/Model 等），无需与原文一致。
+        - 实体类别（Entity.label）必须使用通用英文粗粒度类别（如 Person/Organization/Event/Field/Model 等），不要使用中文类别或领域术语当作 label；不确定时用 unknown。
+        {("- Entity.label 只能取以下枚举之一：" + allowlist_hint) if allowlist_hint else ""}
         - {relation_rule}（relation_name_mode={relation_name_mode}）
         - 关系名保持“现在时含义”的规范表达，时间边界用 t_start/t_end 表达（若文本有明确时间信息）。
         """
@@ -122,6 +127,9 @@ class Prompt(Enum):
             entity_extra = "- Keep entity names (Entity.name) exactly as in the source text; do not translate or romanize.\n"
         if relation_name_mode == "source":
             relation_extra = "- Use Chinese relation names (Relationship.name) as concise verb phrases from the source text; avoid English snake_case.\n"
+        label_extra = ""
+        if allowlist_hint:
+            label_extra = f"- Entity.label must be one of: {allowlist_hint}. Use 'unknown' if unsure.\n"
         return f""" 
         Observation Time : {obs_timestamp}
         
@@ -131,7 +139,7 @@ class Prompt(Enum):
         sacrificing accuracy. Do not add any information that is not explicitly mentioned in the text
         Remember, the knowledge graph should be coherent and easily understandable, 
         so maintaining consistency in entity references is crucial.
-        {entity_extra}{relation_extra}
+        {entity_extra}{label_extra}{relation_extra}
         """
 
 '''

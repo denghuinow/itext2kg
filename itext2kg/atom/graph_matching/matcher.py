@@ -1,11 +1,23 @@
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity  # type: ignore
 from typing import List, Tuple
 from itext2kg.atom.models import Entity, Relationship, KnowledgeGraph
 from itext2kg.atom.graph_matching.matcher_interface import GraphMatcherInterface
 import logging
 
 logger = logging.getLogger(__name__)
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Lightweight cosine similarity to avoid external sklearn dependency.
+    a: shape (N, d), b: shape (M, d) -> returns (N, M)
+    """
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError("cosine_similarity expects 2D arrays")
+    a_norm = np.linalg.norm(a, axis=1, keepdims=True)
+    b_norm = np.linalg.norm(b, axis=1, keepdims=True)
+    a = a / np.clip(a_norm, 1e-12, None)
+    b = b / np.clip(b_norm, 1e-12, None)
+    return a @ b.T
 
 class GraphMatcher(GraphMatcherInterface):
     """

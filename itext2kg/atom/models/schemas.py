@@ -109,10 +109,12 @@ Given an input paragraph and an `observation_date`, generate a list of all disti
 class Entity(BaseModel):
     label: str = Field(
         description=(
-            "The semantic category of the entity (e.g., 'Person', 'Event', 'Location', 'Methodology', 'Position') as you understand it from the text. "
-            "Use 'Relationship' objects if the concept is inherently relational or verbal (e.g., 'plans'). "
-            "Prefer consistent, single-word categories where possible (e.g., 'Person', not 'Person_Entity'). "
-            "Do not extract Date entities as they will be integrated in the relation."
+            "实体的粗粒度类别（coarse-grained category）。"
+            "请使用通用英文类别（例如：Person / Organization / Event / Field / Model / Location / Method / Concept 等），"
+            "优先使用稳定、一致、单词级的类别（例如 'Person' 而不是 'Person_Entity'）。"
+            "不要把领域名/术语本身当作 label（例如把 '人工智能' 作为 label），术语应放在 Entity.name。"
+            "如果无法判断类别，请使用 'unknown'。"
+            "不要抽取 Date 作为实体（时间应放在关系的 t_start/t_end 中）。"
         )
     )
     name: str = Field(
@@ -149,13 +151,12 @@ class Relationship(BaseModel):
     )
     name: str = Field(
         description=(
-            "A single, canonical predicate in PRESENT TENSE capturing how the startNode and endNode relate "
-            "(e.g., 'is_CEO', 'holds_position', 'is_located_in', 'works_at'). "
-            "ALWAYS use present tense verbs regardless of the temporal context in the text. "
-            "Avoid compound verbs (e.g., 'plans_and_executes'). "
-            "If the text implies negation (e.g., 'no longer CEO'), still use the affirmative present form (e.g., 'is_CEO') "
-            "and rely on 't_end' for the end date. "
-            "AVOID preposition-only relation names like 'of', 'in', 'at' - use descriptive present-tense verbs instead."
+            "一个用于表达 startNode 与 endNode 之间关系的谓词（predicate），需使用“现在时含义”的规范表达。"
+            "关系名的语言与命名风格请遵循 system prompt 的要求（例如：中文简洁动词/动宾短语，或英文 snake_case）。"
+            "无论文本时态如何，关系名本身保持“现在时含义”，时间边界请用 t_start/t_end 表达。"
+            "避免复合动词（如 'plans_and_executes'）。"
+            "如文本是否定/终止（例如“不再是 CEO”），关系名仍使用肯定的规范形式（如 'is_CEO'），并用 t_end 表示终止时间。"
+            "避免仅用介词作关系名（如 'of'/'in'/'at'），请使用更具语义的动词表达。"
         )
     )
     t_start: Optional[list[str]] = Field(
@@ -199,8 +200,9 @@ class RelationshipsExtractor(BaseModel):
         description=(
             "Based on the provided entities and context, identify the predicates that define relationships between these entities. "
             "The predicates should be chosen with precision to accurately reflect the expressed relationships. "
-            "CRITICAL: All relationship names must be in PRESENT TENSE (e.g., 'works_at', 'is_CEO', 'manages') "
-            "regardless of whether the relationship is past, present, or future. Use t_start and t_end to capture temporal bounds."
+            "CRITICAL: Relationship names should keep a PRESENT-TENSE meaning (e.g., 'works_at', 'is_CEO', 'manages') "
+            "regardless of whether the relationship is past, present, or future. Use t_start and t_end to capture temporal bounds. "
+            "If the system prompt requires Chinese relation names, use concise Chinese verb phrases instead of English snake_case."
         )
     )
 
